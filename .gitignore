@@ -1,0 +1,23 @@
+# 论文文件（不上传个人论文）
+*.docx
+*.doc
+*.pdf
+*.pptx
+*_backup.*
+~$*
+
+# 解包临时目录
+unpacked/
+unpacked_*/
+template_unpacked/
+
+# 子项目
+awesome-ai-research-writing/
+
+# 系统
+.DS_Store
+__pycache__/
+*.pyc
+
+# Claude skills
+.claude/
