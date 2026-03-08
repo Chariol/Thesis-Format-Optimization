@@ -547,6 +547,128 @@ def remove_extra_blank_lines(body):
 
 
 # ============================================================
+# 格式快照（用于变更报告）
+# ============================================================
+FONT_SIZE_NAME = {v: k for k, v in FONT_SIZES.items()}
+
+
+def snapshot_paragraph(p):
+    """提取段落当前格式属性，返回 dict"""
+    info = {}
+    pPr = p.find(f'{W}pPr')
+
+    # 对齐
+    if pPr is not None:
+        jc = pPr.find(f'{W}jc')
+        if jc is not None:
+            info['jc'] = jc.get(f'{W}val', '')
+        sp = pPr.find(f'{W}spacing')
+        if sp is not None:
+            info['spacing_line'] = sp.get(f'{W}line', '')
+            info['spacing_rule'] = sp.get(f'{W}lineRule', '')
+
+    r = p.find(f'{W}r')
+    if r is not None:
+        rPr = r.find(f'{W}rPr')
+        if rPr is not None:
+            rFonts = rPr.find(f'{W}rFonts')
+            if rFonts is not None:
+                info['eastAsia'] = rFonts.get(f'{W}eastAsia', '')
+                info['ascii'] = rFonts.get(f'{W}ascii', '')
+            sz = rPr.find(f'{W}sz')
+            if sz is not None:
+                info['sz'] = sz.get(f'{W}val', '')
+            info['bold'] = rPr.find(f'{W}b') is not None
+    return info
+
+
+def diff_format(old, fmt):
+    """比较旧快照与目标格式，返回变更列表"""
+    changes = []
+    JC_NAMES = {'left': '左对齐', 'center': '居中', 'both': '两端对齐', 'right': '右对齐'}
+
+    if old.get('eastAsia') and old['eastAsia'] != fmt['eastAsia']:
+        changes.append(f"中文字体 {old['eastAsia']}→{fmt['eastAsia']}")
+    if old.get('ascii') and old['ascii'] != fmt['ascii']:
+        changes.append(f"西文字体 {old['ascii']}→{fmt['ascii']}")
+    if old.get('sz'):
+        old_sz = int(old['sz'])
+        if old_sz != fmt['sz']:
+            old_name = FONT_SIZE_NAME.get(old_sz, f'{old_sz}hp')
+            new_name = FONT_SIZE_NAME.get(fmt['sz'], f"{fmt['sz']}hp")
+            changes.append(f"字号 {old_name}→{new_name}")
+    if 'bold' in old and old['bold'] != fmt['bold']:
+        changes.append("加粗→取消" if old['bold'] else "取消→加粗")
+    if old.get('jc') and old['jc'] != fmt['jc']:
+        changes.append(f"对齐 {JC_NAMES.get(old['jc'], old['jc'])}→{JC_NAMES.get(fmt['jc'], fmt['jc'])}")
+    return changes
+
+
+# ============================================================
+# 图表编号检查
+# ============================================================
+def check_figure_table_numbering(root):
+    """扫描所有图题/表题，检查分章编号是否连续正确"""
+    chapter = 0
+    fig_seq = {}   # chapter -> last seq
+    table_seq = {} # chapter -> last seq
+    errors = []
+    all_captions = []
+
+    for p in root.findall(f'.//{W}p'):
+        parent = p.getparent()
+        if parent is not None and parent.tag == f'{W}tc':
+            continue
+
+        texts = []
+        for t in p.findall(f'.//{W}t'):
+            if t.text:
+                texts.append(t.text)
+        text = ''.join(texts).strip()
+        if not text:
+            continue
+
+        # 检测章节
+        m_ch = re.match(r'^第[一二三四五六七八九十百]+章', text)
+        if m_ch:
+            ch_map = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10}
+            ch_text = text[1:text.index('章')]
+            if ch_text in ch_map:
+                chapter = ch_map[ch_text]
+            continue
+
+        # 图题: 图X-Y 或 图X.Y
+        m_fig = re.match(r'^图\s*(\d+)[-.](\d+)', text)
+        if m_fig:
+            ch_num, seq_num = int(m_fig.group(1)), int(m_fig.group(2))
+            caption_text = text[:min(len(text), 30)]
+            all_captions.append(('图', ch_num, seq_num, caption_text))
+            if ch_num != chapter:
+                errors.append(f"  ✗ 「{caption_text}」章号={ch_num}，但当前在第{chapter}章")
+            expected = fig_seq.get(ch_num, 0) + 1
+            if seq_num != expected:
+                errors.append(f"  ✗ 「{caption_text}」序号={seq_num}，期望={expected}")
+            fig_seq[ch_num] = seq_num
+            continue
+
+        # 表题: 表X-Y 或 表X.Y
+        m_tbl = re.match(r'^表\s*(\d+)[-.](\d+)', text)
+        if m_tbl:
+            ch_num, seq_num = int(m_tbl.group(1)), int(m_tbl.group(2))
+            caption_text = text[:min(len(text), 30)]
+            all_captions.append(('表', ch_num, seq_num, caption_text))
+            if ch_num != chapter:
+                errors.append(f"  ✗ 「{caption_text}」章号={ch_num}，但当前在第{chapter}章")
+            expected = table_seq.get(ch_num, 0) + 1
+            if seq_num != expected and not text.startswith('续表'):
+                errors.append(f"  ✗ 「{caption_text}」序号={seq_num}，期望={expected}")
+            table_seq[ch_num] = seq_num
+            continue
+
+    return all_captions, errors
+
+
+# ============================================================
 # 格式应用函数
 # ============================================================
 def apply_format(p, fmt):
@@ -929,15 +1051,13 @@ def main():
     # Step 3.5: 公式自动编号
     formula_numbered = number_formulas(root)
 
-    # Step 4: 格式化段落（上下文感知）
+    # Step 4: 格式化段落（上下文感知）+ 变更跟踪
     stats = {}
     unclassified = []
+    change_log = []  # [(text_preview, cat, changes)]
     section_ctx = SECTION_COVER
-    in_abstract_cn = False
-    in_abstract_en = False
 
     for p in root.findall(f'.//{W}p'):
-        # Skip paragraphs inside tables
         parent = p.getparent()
         if parent is not None and parent.tag == f'{W}tc':
             continue
@@ -948,29 +1068,33 @@ def main():
                 texts.append(t.text)
         text = ''.join(texts).strip()
 
-        # Detect section transitions
         if text:
             new_ctx = detect_section_context(text)
             if new_ctx:
                 section_ctx = new_ctx
 
-        # Check for formula paragraphs
         if has_formula(p) and text:
+            old = snapshot_paragraph(p)
             apply_format(p, FORMATS['formula'])
+            diffs = diff_format(old, FORMATS['formula'])
+            if diffs:
+                change_log.append((text[:30], '公式', diffs))
             stats['formula'] = stats.get('formula', 0) + 1
             continue
 
-        # Check TOC paragraphs by style
         toc_level = is_toc_paragraph(p)
         if toc_level and toc_level in FORMATS:
+            old = snapshot_paragraph(p)
             apply_format(p, FORMATS[toc_level])
+            diffs = diff_format(old, FORMATS[toc_level])
+            if diffs:
+                change_log.append((text[:30] if text else f'[{toc_level}]', toc_level, diffs))
             stats[toc_level] = stats.get(toc_level, 0) + 1
             continue
 
         if not text:
             continue
 
-        # Handle abstract body paragraphs
         if section_ctx == SECTION_ABSTRACT_CN:
             cat = classify_paragraph(text, section_ctx)
             if cat is None:
@@ -982,22 +1106,27 @@ def main():
         else:
             cat = classify_paragraph(text, section_ctx)
 
-        # Default: apply body format to unclassified paragraphs in body sections
         if cat is None and section_ctx in (SECTION_BODY,):
             if not has_image(p):
                 cat = 'body'
 
         if cat and cat in FORMATS:
+            old = snapshot_paragraph(p)
             apply_format(p, FORMATS[cat])
-            # Apply reference hanging indent
             if cat == 'reference_body':
                 apply_reference_hanging_indent(p, text)
+            diffs = diff_format(old, FORMATS[cat])
+            if diffs:
+                change_log.append((text[:30], cat, diffs))
             stats[cat] = stats.get(cat, 0) + 1
         else:
             if text and len(text) > 50:
                 text = text[:50] + '...'
             if text:
                 unclassified.append(text)
+
+    # Step 5: 检查图表编号
+    captions, numbering_errors = check_figure_table_numbering(root)
 
     tree.write(xml_path, xml_declaration=True, encoding='UTF-8', standalone=True)
 
@@ -1046,21 +1175,81 @@ def main():
         if len(unclassified) > 10:
             print(f"  ... 还有 {len(unclassified) - 10} 个")
 
-    print("\n格式规范对照表（39条批注全覆盖）:")
-    print("  批注0:  页面边距 A4 左右3.17cm 上下2.54cm ✓")
-    print("  批注0:  页眉页脚 (由 format_headers_footers.py 处理) ✓")
-    print("  批注1-4: 封面格式 ✓")
-    print("  批注6-9: 声明页格式 ✓")
-    print("  批注10-15: 摘要/ABSTRACT/关键词 ✓")
-    print("  批注16: 目录标题及目录项格式 ✓")
-    print("  批注17: 符号说明 ✓")
-    print("  批注18-20: 一二三级标题+正文 ✓")
-    print("  批注21: 脚注格式 ✓")
-    print("  批注22-23,27-28: 图表标题/注释 ✓")
-    print("  批注25,31: 三四级标题 ✓")
-    print("  批注26: 公式段落+自动编号(X-Y) ✓")
-    print("  批注33: 参考文献+悬挂缩进 ✓")
-    print("  批注34-38: 致谢/附录/个人简历 ✓")
+    # === 写入变更日志文件 ===
+    from datetime import datetime
+    log_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(xml_path)
+    log_path = os.path.join(log_dir, 'format_changes.log')
+    with open(log_path, 'w', encoding='utf-8') as log:
+        log.write(f"北京邮电大学学位论文格式化变更报告\n")
+        log.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log.write("=" * 60 + "\n\n")
+
+        # 操作摘要
+        log.write("【操作摘要】\n")
+        if removed_count > 0:
+            log.write(f"  删除多余空行: {removed_count} 个\n")
+        if margin_count > 0:
+            log.write(f"  修正页面边距: {margin_count} 个节\n")
+        if fn_count > 0:
+            log.write(f"  格式化脚注: {fn_count} 条\n")
+        if formula_numbered:
+            total_formulas = sum(formula_numbered.values())
+            parts = [f"第{ch}章{cnt}个" for ch, cnt in sorted(formula_numbered.items())]
+            log.write(f"  公式自动编号: {total_formulas} 个 ({', '.join(parts)})\n")
+        log.write(f"  格式化段落: {total} 个\n\n")
+
+        # 段落统计
+        log.write("【段落统计】\n")
+        for cat, count in sorted(stats.items(), key=lambda x: -x[1]):
+            label = label_map.get(cat, cat)
+            log.write(f"  {label}: {count} 个\n")
+        log.write(f"  总计: {total} 个\n\n")
+
+        # 变更汇总
+        log.write("【格式变更汇总】\n")
+        if change_log:
+            changed_cats = {}
+            for text_preview, cat, diffs in change_log:
+                for d in diffs:
+                    changed_cats.setdefault(d, 0)
+                    changed_cats[d] += 1
+            for desc, cnt in sorted(changed_cats.items(), key=lambda x: -x[1]):
+                log.write(f"  {desc}: {cnt} 处\n")
+        else:
+            log.write("  无（所有段落格式已符合规范）\n")
+        log.write("\n")
+
+        # 变更明细（完整输出，不截断）
+        log.write(f"【格式变更明细】（共 {len(change_log)} 个段落有实际修改）\n")
+        for text_preview, cat, diffs in change_log:
+            cat_label = label_map.get(cat, cat)
+            log.write(f"  [{cat_label}] {text_preview}  ← {', '.join(diffs)}\n")
+        log.write("\n")
+
+        # 图表编号检查
+        fig_count = sum(1 for c in captions if c[0] == '图')
+        tbl_count = sum(1 for c in captions if c[0] == '表')
+        log.write(f"【图表编号检查】（共 {fig_count} 个图, {tbl_count} 个表）\n")
+        for kind, ch, seq, text_preview in captions:
+            log.write(f"  {kind}{ch}-{seq}  {text_preview}\n")
+        if numbering_errors:
+            log.write(f"\n  ⚠ 发现 {len(numbering_errors)} 个编号问题:\n")
+            for err in numbering_errors:
+                log.write(f"{err}\n")
+        else:
+            log.write("  ✓ 所有图表编号连续正确\n")
+
+    # 终端摘要
+    fig_count = sum(1 for c in captions if c[0] == '图')
+    tbl_count = sum(1 for c in captions if c[0] == '表')
+    change_count = len(change_log)
+    print(f"\n格式变更: {change_count} 个段落有实际修改")
+    print(f"图表编号: {fig_count} 个图, {tbl_count} 个表", end="")
+    if numbering_errors:
+        print(f"  ⚠ {len(numbering_errors)} 个编号问题")
+    else:
+        print("  ✓ 编号正确")
+    print(f"\n详细变更日志 → {log_path}")
 
 
 if __name__ == '__main__':

@@ -43,7 +43,7 @@ fi
 echo "[2/5] 解包完成"
 
 # 3. 格式化正文
-python3 "$SCRIPT_DIR/format_thesis.py" "$WORK_DIR/word/document.xml"
+python3 "$SCRIPT_DIR/format_thesis.py" "$WORK_DIR/word/document.xml" "$SCRIPT_DIR"
 echo "[3/5] 正文格式化完成"
 
 # 4. 格式化页眉页脚
