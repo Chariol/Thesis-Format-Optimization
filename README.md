@@ -19,8 +19,8 @@
 pip3 install lxml
 
 # 2. 克隆仓库
-git clone https://github.com/Chariol/-.git
-cd -
+git clone https://github.com/Chariol/Thesis-Format-Optimization.git 
+cd Thesis-Format-Optimization
 
 # 3. 格式化你的论文
 bash format.sh 你的论文.docx
@@ -29,12 +29,12 @@ bash format.sh 你的论文.docx
 ## 使用示例
 
 ```
-$ bash format.sh 大论文初稿_v20260308朱仪雯.docx
+$ bash format.sh 论文_v20260308.docx
 
 ============================================================
   北京邮电大学学位论文格式化工具
 ============================================================
-[1/5] 已备份原文件 → 大论文初稿_v20260308朱仪雯_backup.docx
+[1/5] 已备份原文件 → 大论文_v20260308_backup.docx
 [2/5] 解包完成
 ============================================================
 北京邮电大学学位论文格式化完成（完整版）
@@ -72,10 +72,10 @@ $ bash format.sh 大论文初稿_v20260308朱仪雯.docx
 
 [3/5] 正文格式化完成
 [4/5] 页眉页脚格式化完成
-[5/5] 打包完成 → 大论文初稿_v20260308朱仪雯.docx
+[5/5] 打包完成 → 大论文初稿_v20260308.docx
 
-完成！请用 Word 打开 大论文初稿_v20260308朱仪雯.docx 查看效果。
-如需恢复，原文件在 大论文初稿_v20260308朱仪雯_backup.docx
+完成！请用 Word 打开 大论文_v20260308.docx 查看效果。
+如需恢复，原文件在 大论文_v20260308_backup.docx
 ```
 
 原文件自动备份为 `*_backup.docx`，格式化后直接用 Word 打开即可。
